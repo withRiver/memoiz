@@ -10,7 +10,11 @@
 //! - **线程安全**：基于 `Mutex` 实现，支持多线程并发访问。
 //! - **惰性初始化**：缓存仅在第一次调用时初始化，节省资源。
 //! - **参数限制**：函数参数必须实现 `Clone + PartialEq + Eq + Hash`（默认要求）。
-//!
+//! 
+//! ## 更新
+//! 
+//! v0.2.0: 参数中的不可变引用参数不会被缓存，从而支持了被标注函数参数中有不可变引用（如Vec, Slice等不可变引用）的使用场景。
+//! 
 //! ## 示例
 //!
 //! ```rust
@@ -33,7 +37,7 @@
 //!
 //! 1. **参数类型要求**：
 //!    - 函数参数必须支持 `Clone + PartialEq + Eq + Hash`，否则无法作为缓`存键。
-//!    - 如果参数包含不可克隆/不可比较的类型（如 `Vec<u8>`），需手动包装或改用其他缓存策略。
+//!    - 如果参数包含不可克隆/不可比较的类型（如 `Vec<u8>`），需手动包装或改用其他缓存策略。（若在每次递归调用中该参数值不变，那么可以传入不可变引用）
 //!
 //! 2. **线程安全**：
 //!    - 缓存使用 `Mutex` 保护，确保多线程环境下安全访问。
@@ -66,7 +70,7 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse_macro_input, spanned::Spanned, Error, FnArg, Ident, ItemFn, Pat, PatIdent, ReturnType, 
+    parse_macro_input, spanned::Spanned, Error, FnArg, Ident, Type, ItemFn, Pat, PatIdent, ReturnType, 
     parse::{Parse, ParseStream}, punctuated::Punctuated, Token
 };
 use std::collections::HashSet;
@@ -88,7 +92,7 @@ impl Parse for KeyArgs {
 #[proc_macro_attribute]
 pub fn memo(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(item as ItemFn);
-    let key_arg_names = parse_macro_input!(attr as KeyArgs).args;
+    let _key_arg_names = parse_macro_input!(attr as KeyArgs).args;
 
     let fn_name = &input_fn.sig.ident;
     let fn_vis = &input_fn.vis;
@@ -132,29 +136,45 @@ pub fn memo(attr: TokenStream, item: TokenStream) -> TokenStream {
         .unwrap()
         .into_iter()
         .unzip();
-    
-    if args.is_empty() { return quote! {#fn_vis #fn_sig #fn_block}.into() ; }
 
-    let key_arg_names_set: HashSet<String> = key_arg_names.iter().map(|id| id.to_string()).collect();
-    let use_all_args = key_arg_names_set.is_empty();
 
-    let (key_args, key_types): (Vec<_>, Vec<_>) = args.iter()
-        .zip(param_types.into_iter())
-        .filter(|(arg, _)| use_all_args || key_arg_names_set.contains(&arg.to_string()))
-        .map(|(arg, ty)| (arg.clone(), ty.clone()))
-        .unzip();   
-
-    // 检查无效的参数名
-    if !use_all_args {
-        let arg_names: HashSet<String> = args.iter().map(|a| a.to_string()).collect();
-        for name in &key_arg_names {
-            if !arg_names.contains(&name.to_string()) {
-                return Error::new(name.span(), format!("'{}' is not a function parameter", name))
-                    .to_compile_error()
-                    .into();
+    // 提取参数中的不可变引用
+    let mut immutable_references = HashSet::<String>::new();
+    for arg in input_fn.sig.inputs.iter() {
+        if let FnArg::Typed(pat_type) = arg {
+            if let Type::Reference(ty_ref) = &*pat_type.ty {
+                if ty_ref.mutability.is_none() {
+                    if let Pat::Ident(pat_ident) = &*pat_type.pat {
+                        immutable_references.insert(pat_ident.ident.to_string());
+                    }
+                }
             }
         }
     }
+
+    
+    if args.is_empty() { return quote! {#fn_vis #fn_sig #fn_block}.into() ; }
+
+    // let key_arg_names_set: HashSet<String> = key_arg_names.iter().map(|id| id.to_string()).collect();
+    // let use_all_args = key_arg_names_set.is_empty();
+
+    let (key_args, key_types): (Vec<_>, Vec<_>) = args.iter()
+        .zip(param_types.into_iter())
+        .filter(|(arg, _)| !immutable_references.contains(&arg.to_string()))
+        .map(|(arg, ty)| (arg.clone(), ty.clone()))
+        .unzip();   
+
+    // // 检查无效的参数名
+    // if !use_all_args {
+    //     let arg_names: HashSet<String> = args.iter().map(|a| a.to_string()).collect();
+    //     for name in &key_arg_names {
+    //         if !arg_names.contains(&name.to_string()) {
+    //             return Error::new(name.span(), format!("'{}' is not a function parameter", name))
+    //                 .to_compile_error()
+    //                 .into();
+    //         }
+    //     }
+    // }
 
 
     let key_type = if key_types.len() == 1 {
