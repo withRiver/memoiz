@@ -63,22 +63,39 @@
 //!
 //!
 
-
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse_macro_input, spanned::Spanned, Error, FnArg, Ident, ItemFn, Pat, PatIdent, ReturnType,
+    parse_macro_input, spanned::Spanned, Error, FnArg, Ident, ItemFn, Pat, PatIdent, ReturnType, 
+    parse::{Parse, ParseStream}, punctuated::Punctuated, Token
 };
+use std::collections::HashSet;
+
+struct KeyArgs {
+    args: Vec<Ident>, 
+}
+
+impl Parse for KeyArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let args = Punctuated::<Ident, Token![,]>::parse_terminated(input)?;
+        Ok(Self {
+            args: args.into_iter().collect(),
+        })
+    }
+}
+
 
 #[proc_macro_attribute]
-pub fn memo(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn memo(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(item as ItemFn);
+    let key_arg_names = parse_macro_input!(attr as KeyArgs).args;
 
     let fn_name = &input_fn.sig.ident;
     let fn_vis = &input_fn.vis;
     let fn_block = &input_fn.block;
     let fn_inputs = &input_fn.sig.inputs;
     let fn_output = &input_fn.sig.output;
+    let fn_sig = &input_fn.sig;
 
     // 无缓存版本的函数名: func_no_cache
     let no_cache_name = Ident::new(&format!("{}_no_cache", fn_name), fn_name.span());
@@ -115,24 +132,51 @@ pub fn memo(_attr: TokenStream, item: TokenStream) -> TokenStream {
         .unwrap()
         .into_iter()
         .unzip();
+    
+    if args.is_empty() { return quote! {#fn_vis #fn_sig #fn_block}.into() ; }
 
-    let key_type = if param_types.len() == 1 {
-        quote! { #(#param_types)* }
+    let key_arg_names_set: HashSet<String> = key_arg_names.iter().map(|id| id.to_string()).collect();
+    let use_all_args = key_arg_names_set.is_empty();
+
+    let (key_args, key_types): (Vec<_>, Vec<_>) = args.iter()
+        .zip(param_types.into_iter())
+        .filter(|(arg, _)| use_all_args || key_arg_names_set.contains(&arg.to_string()))
+        .map(|(arg, ty)| (arg.clone(), ty.clone()))
+        .unzip();   
+
+    // 检查无效的参数名
+    if !use_all_args {
+        let arg_names: HashSet<String> = args.iter().map(|a| a.to_string()).collect();
+        for name in &key_arg_names {
+            if !arg_names.contains(&name.to_string()) {
+                return Error::new(name.span(), format!("'{}' is not a function parameter", name))
+                    .to_compile_error()
+                    .into();
+            }
+        }
+    }
+
+
+    let key_type = if key_types.len() == 1 {
+        quote! { #(#key_types)* }
     } else {
-        quote! { (#(#param_types),*) }
+        quote! { (#(#key_types),*) }
     };
+
+    //key = (arg1.clone(), arg2.clone())
+    let key_exprs = key_args.iter().map(|arg| quote! { #arg.clone() });
+    let key_tuple = quote! { (#(#key_exprs),*) };
+
+    // (arg1, arg2, ...)
+    let call_args = args.iter().map(|arg| quote! { #arg });
+
 
     let return_type = match fn_output {
         ReturnType::Default => quote! { () },
         ReturnType::Type(_, ty) => quote! { #ty },
     };
 
-    //key = (arg1.clone(), arg2.clone())
-    let key_exprs = args.iter().map(|arg| quote! { #arg.clone() });
-    let key_tuple = quote! { (#(#key_exprs),*) };
 
-    // (arg1, arg2, ...)
-    let call_args = args.iter().map(|arg| quote! { #arg });
 
     let create_cache = quote! {
         static #cache_name: ::std::sync::LazyLock<::std::sync::Mutex<::std::collections::HashMap<#key_type, #return_type>>> = ::std::sync::LazyLock::new(|| {
