@@ -147,6 +147,13 @@ pub fn memo(attr: TokenStream, item: TokenStream) -> TokenStream {
                     if let Pat::Ident(pat_ident) = &*pat_type.pat {
                         immutable_references.insert(pat_ident.ident.to_string());
                     }
+                } else {
+                    if let Pat::Ident(pat_ident) = &*pat_type.pat {
+                        return Error::new(ty_ref.span(), format!("memo supports only immutable references in parameters, but {} is mutable", pat_ident.ident))
+                            .to_compile_error()
+                            .into();
+                    }
+
                 }
             }
         }
